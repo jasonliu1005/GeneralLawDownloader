@@ -1,9 +1,11 @@
 # Massachusetts General Laws Downloader & CourtListener Case Crawler
 
-This repository contains two Python scripts:
+This repository contains several Python scripts:
 
 1. **Massachusetts General Laws Downloader** - Downloads all Massachusetts General Laws from the [Massachusetts Legislature API](https://malegislature.gov/api/swagger/index.html?url=/api/swagger/v1/swagger.json#/).
-2. **CourtListener Case Crawler** - Crawls [CourtListener.com](https://www.courtlistener.com) to download law cases from search results.
+2. **CourtListener Case Crawler** - Crawls [CourtListener.com](https://www.courtlistener.com) to download law cases from search results. Supports one or more years and creates a subfolder per year.
+3. **CourtListener Case Crawler (API)** - Same as above but uses the CourtListener Legal Search API.
+4. **Filter Cases by Content** - Copies law case JSON files to an output folder only when the `content` field length exceeds a minimum threshold.
 
 ## Features
 
@@ -89,33 +91,37 @@ The `case_crawler.py` script crawls CourtListener.com to download law cases from
 ### Usage
 
 ```bash
-# Use year parameter (recommended - automatically constructs URL)
-python case_crawler.py --year 2025
+# Single year (creates output/2025/)
+python case_crawler.py --year 2025 -o ma_cases
 
-# Use custom URL instead
+# Multiple years (creates ma_cases/2016/, ma_cases/2017/, ma_cases/2020/)
+python case_crawler.py --year 2016 2017 2020 -o ma_cases
+
+# Use custom URL instead (no year subfolder)
 python case_crawler.py --url "https://www.courtlistener.com/?q=&type=o&order_by=dateFiled%20desc&stat_Published=on&filed_after=01%2F01%2F2025&filed_before=01%2F01%2F2026&court=mass%20massappct%20masssuperct%20massdistct%20masslandct%20maworkcompcom"
 
-# Specify output directory
-python case_crawler.py --year 2025 -o ./my_cases
-
-# Limit to first 5 pages (for testing)
-python case_crawler.py --year 2025 -p 5
+# Limit to first 5 pages per year (for testing)
+python case_crawler.py --year 2025 -p 5 -o ma_cases
 
 # Use different court filter with year
-python case_crawler.py --year 2025 -c "mass massappct"
+python case_crawler.py --year 2025 -c "mass massappct" -o ma_cases
 ```
 
 ### Command-line Options
 
-- `-y, --year`: Target year to crawl (e.g., 2025). Automatically constructs URL with date range 01/01/YEAR to 01/01/YEAR+1. Mutually exclusive with `--url`.
-- `-u, --url`: Custom URL of the index/search results page to start crawling from. Mutually exclusive with `--year`.
-- `-o, --output`: Output directory for downloaded cases (default: `law_cases/`)
-- `-p, --max-pages`: Maximum number of pages to crawl (default: all pages)
+- `-y, --year`: Target year(s) to crawl (e.g., `2025` or `2016 2017 2020`). Creates a subfolder per year under the output directory. Automatically constructs URL with date range 01/01/YEAR to 01/01/YEAR+1. Mutually exclusive with `--url`.
+- `-u, --url`: Custom URL of the index/search results page to start crawling from. No year subfolder is created. Mutually exclusive with `--year`.
+- `-o, --output`: Output directory for downloaded cases (default: `law_cases/`). With `--year`, a subfolder per year is created (e.g. `ma_cases/2016/`, `ma_cases/2017/`).
+- `-p, --max-pages`: Maximum number of pages to crawl per year (default: all pages)
 - `-c, --courts`: Court filter string (default: Massachusetts courts). Only used with `--year` option.
+
+### Output Structure
+
+When using `--year`, each year gets its own subfolder under the output directory (e.g. `ma_cases/2016/`, `ma_cases/2017/`). Cases already present in the output folder (by URL) are skipped. Each case is saved as its own JSON file (e.g. `00001_Case_Name.json`).
 
 ### Output Format
 
-Cases are saved as `cases.json` in the output directory. Each case includes:
+Each case JSON file includes:
 
 - `url`: Case detail page URL
 - `content`: Plain text content from the main document (HTML filtered out)
@@ -131,20 +137,49 @@ Cases are saved as `cases.json` in the output directory. Each case includes:
 
 ### How It Works
 
-1. Starts from the provided index/search results URL
-2. Parses the `div#search-results` to extract case detail page URLs
-3. For each case, visits the detail page and extracts content from `div.col-sm-9.main-document`
-4. Filters out HTML tags to get plain text
-5. Extracts structured metadata fields
-6. Handles pagination by detecting next page links or incrementing `&page=` parameter
-7. Saves all cases to a single JSON file
+1. For each year (or single custom URL), constructs the search URL and creates output subfolder `output/YEAR/`
+2. Scans the output folder for already-downloaded case URLs and skips them
+3. Parses the `div#search-results` to extract case detail page URLs
+4. For each case not already downloaded, visits the detail page and extracts content from `div.col-sm-9.main-document`
+5. Filters out HTML tags (including `<br>` as spaces) to get plain text
+6. Extracts structured metadata fields (Judges, Dates, etc.)
+7. Handles pagination by detecting next page links or incrementing `&page=` parameter
+8. Saves each case to its own JSON file immediately
 
 ### Notes
 
 - The crawler includes delays between requests to be respectful to CourtListener's servers
 - Includes retry logic for failed requests
 - Automatically handles pagination until no more results are found
-- Each case is saved to its own JSON file for better organization
+- Each case is saved to its own JSON file; re-runs skip already-downloaded cases by URL
+- Multiple years create separate subfolders (e.g. `ma_cases/2016/`, `ma_cases/2017/`)
+
+---
+
+## Filter Cases by Content
+
+The `filter_cases_by_content.py` script reads law case JSON files from an input folder (recursively, including subfolders) and copies each file to an output folder only when the `content` string length is greater than a minimum threshold.
+
+### Usage
+
+```bash
+# Copy only cases with content length > 400 (default)
+python filter_cases_by_content.py -i ma_cases -o filtered_cases
+
+# Minimum content length of 1000
+python filter_cases_by_content.py -i ma_cases -o filtered_cases -m 1000
+```
+
+### Command-line Options
+
+- `-i, --input`: Input folder containing law case JSON files (searched recursively including subfolders)
+- `-o, --output`: Output folder where filtered files will be copied (relative path structure preserved)
+- `-m, --min-length`: Minimum content string length to copy (default: 400)
+
+### Notes
+
+- Preserves the directory structure (e.g. `ma_cases/2017/00001_foo.json` → `filtered_cases/2017/00001_foo.json`)
+- Files without a `content` field or with invalid JSON are skipped
 
 ---
 

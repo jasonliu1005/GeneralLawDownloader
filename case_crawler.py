@@ -932,13 +932,16 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Use year parameter (recommended)
+  # Single year (creates output/2025/)
   python case_crawler.py --year 2025
   
-  # Use custom URL
+  # Multiple years (creates output/2016/, output/2017/, output/2020/)
+  python case_crawler.py --year 2016 2017 2020 -o ma_cases
+  
+  # Use custom URL (no year subfolder)
   python case_crawler.py --url "https://www.courtlistener.com/?q=..."
   
-  # Limit to first 3 pages
+  # Limit to first 3 pages per year
   python case_crawler.py --year 2025 -p 3
         """
     )
@@ -948,26 +951,28 @@ Examples:
     url_group.add_argument(
         "-y", "--year",
         type=int,
-        help="Target year to crawl (e.g., 2025). Will construct URL with date range 01/01/YEAR to 01/01/YEAR+1"
+        nargs="+",
+        metavar="YEAR",
+        help="Target year(s) to crawl (e.g., 2025 or 2016 2017 2020). Creates a subfolder per year. URL uses date range 01/01/YEAR to 01/01/YEAR+1"
     )
     url_group.add_argument(
         "-u", "--url",
         type=str,
         dest="index_url",
-        help="Custom URL of the index/search results page to start crawling from"
+        help="Custom URL of the index/search results page to start crawling from (no year subfolder)"
     )
     
     parser.add_argument(
         "-o", "--output",
         type=str,
         default=OUTPUT_DIR,
-        help=f"Output directory for downloaded cases (default: {OUTPUT_DIR})"
+        help=f"Output directory for downloaded cases (default: {OUTPUT_DIR}). With --year, a subfolder per year is created (e.g. {OUTPUT_DIR}/2025/)."
     )
     parser.add_argument(
         "-p", "--max-pages",
         type=int,
         default=None,
-        help="Maximum number of pages to crawl (default: all pages)"
+        help="Maximum number of pages to crawl per year (default: all pages)"
     )
     parser.add_argument(
         "-c", "--courts",
@@ -978,11 +983,20 @@ Examples:
     
     args = parser.parse_args()
     
-    # Determine the index URL
     if args.year is not None:
-        index_url = build_index_url_from_year(args.year, args.courts)
-        print(f"Constructed URL for year {args.year}: {index_url}\n")
+        # One or more years: create subfolder per year and crawl each
+        years = args.year
+        base_output = args.output
+        for i, year in enumerate(years, 1):
+            index_url = build_index_url_from_year(year, args.courts)
+            year_output = str(Path(base_output) / str(year))
+            print(f"\n{'='*60}")
+            print(f"Year {i}/{len(years)}: {year}")
+            print(f"Constructed URL: {index_url}")
+            print(f"Output folder: {year_output}")
+            print(f"{'='*60}\n")
+            crawl_cases(index_url, args.max_pages, year_output)
     else:
+        # Custom URL: single crawl, no year subfolder
         index_url = args.index_url
-    
-    crawl_cases(index_url, args.max_pages, args.output)
+        crawl_cases(index_url, args.max_pages, args.output)
