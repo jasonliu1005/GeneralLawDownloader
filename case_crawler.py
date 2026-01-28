@@ -722,6 +722,34 @@ def get_case_filename(case_data: Dict, output_path: Path, case_index: Optional[i
     return output_path / f"{filename}.json"
 
 
+def get_downloaded_urls(output_path: Path) -> set:
+    """
+    Scan the output folder for existing case JSON files and return the set of
+    case URLs that have already been downloaded.
+    
+    Args:
+        output_path: Output directory path
+        
+    Returns:
+        Set of case URLs that are already in the output folder
+    """
+    downloaded = set()
+    if not output_path.exists():
+        return downloaded
+    
+    for json_file in output_path.glob("*.json"):
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                url = data.get('url')
+                if url:
+                    downloaded.add(url)
+        except (json.JSONDecodeError, OSError):
+            continue
+    
+    return downloaded
+
+
 def save_case_to_file(case_data: Dict, output_path: Path, case_index: Optional[int] = None) -> Path:
     """
     Save a single case to its own JSON file.
@@ -797,10 +825,16 @@ def crawl_cases(index_url: str, max_pages: Optional[int] = None, output_dir: str
     output_path.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {output_path.absolute()}\n")
     
+    # Load set of already-downloaded case URLs so we can skip them
+    downloaded_urls = get_downloaded_urls(output_path)
+    if downloaded_urls:
+        print(f"  Found {len(downloaded_urls)} already-downloaded cases in output folder (will skip).\n")
+    
     current_url = index_url
     page_num = 1
     total_cases_saved = 0
-    case_counter = 0
+    case_counter = 0  # Incremented only when we save a new case
+    total_skipped = 0
     
     print(f"Starting crawl from: {index_url}\n")
     
@@ -822,6 +856,16 @@ def crawl_cases(index_url: str, max_pages: Optional[int] = None, output_dir: str
         
         # Process each case
         for idx, case_url in enumerate(case_urls, 1):
+            # Normalize URL for comparison (strip trailing slash, etc.)
+            case_url_normalized = case_url.rstrip('/')
+            
+            # Skip if already downloaded
+            if case_url_normalized in downloaded_urls or case_url in downloaded_urls:
+                total_skipped += 1
+                case_counter += 1  # Increment so filename IDs don't collide with existing files
+                print(f"    [{idx}/{len(case_urls)}] Skipping (already downloaded): {case_url}")
+                continue
+            
             print(f"    [{idx}/{len(case_urls)}] Processing: {case_url}")
             case_data = parse_case_detail(case_url)
             
@@ -830,6 +874,10 @@ def crawl_cases(index_url: str, max_pages: Optional[int] = None, output_dir: str
                 # Save each case to its own file immediately
                 case_file = save_case_to_file(case_data, output_path, case_counter)
                 total_cases_saved += 1
+                # Add to downloaded set so we don't re-download if seen again
+                downloaded_urls.add(case_data.get('url', case_url))
+                downloaded_urls.add(case_url_normalized)
+                downloaded_urls.add(case_url)
                 case_name = case_data.get('Case Name', 'Unknown')
                 print(f"      ✓ Extracted and saved: {case_name}")
                 print(f"        Saved to: {case_file.name}")
@@ -872,7 +920,10 @@ def crawl_cases(index_url: str, max_pages: Optional[int] = None, output_dir: str
             print("\n  Could not parse page for pagination check. Stopping.")
             current_url = None
     
-    print(f"\n✓ Download complete! Saved {total_cases_saved} cases to individual JSON files in: {output_path.absolute()}")
+    if total_skipped > 0:
+        print(f"\n✓ Download complete! Saved {total_cases_saved} new cases, skipped {total_skipped} already-downloaded. Output: {output_path.absolute()}")
+    else:
+        print(f"\n✓ Download complete! Saved {total_cases_saved} cases to individual JSON files in: {output_path.absolute()}")
 
 
 if __name__ == "__main__":
