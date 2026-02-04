@@ -188,6 +188,12 @@ def make_api_request(url: str, api_token: Optional[str] = None, max_retries: int
     return None
 
 
+def get_decade_folder(year: int) -> str:
+    """Return decade folder name for a year, e.g. 1975 -> '1970s'."""
+    decade_start = (year // 10) * 10
+    return f"{decade_start}s"
+
+
 def build_api_url_from_year(year: int, courts: str = DEFAULT_COURTS, api_token: Optional[str] = None) -> str:
     """
     Build a CourtListener API URL from a target year.
@@ -480,13 +486,16 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Single year (creates output_dir/2025/)
+  # Single year (creates output_dir/2020s/2025/)
   python case_crawler_api.py --year 2025 --api-token YOUR_TOKEN
   
-  # Multiple years (creates output_dir/2023/, output_dir/2024/, output_dir/2025/)
+  # Multiple years (creates output_dir/2020s/2023/, output_dir/2020s/2024/, etc.)
   python case_crawler_api.py --year 2023 2024 2025 --api-token YOUR_TOKEN
   
-  # Use custom URL (no year subfolder; saves directly to output_dir)
+  # Years span decades (creates output_dir/1970s/1975/, output_dir/1980s/1985/, ...)
+  python case_crawler_api.py --year 1975 1985 1995 --api-token YOUR_TOKEN
+  
+  # Use custom URL (no year/decade subfolder; saves directly to output_dir)
   python case_crawler_api.py --url "https://www.courtlistener.com/api/rest/v4/search/?q=..." --api-token YOUR_TOKEN
   
   # Limit to first 100 results per year
@@ -506,7 +515,7 @@ Examples:
         nargs="+",
         dest="years",
         metavar="YEAR",
-        help="One or more target years (e.g., -y 2024 2025). Creates a subfolder per year under output_dir."
+        help="One or more target years (e.g., -y 2024 2025). Creates output_dir/<decade>/<year>/ (e.g. output_dir/2020s/2024/)."
     )
     url_group.add_argument(
         "-u", "--url",
@@ -555,11 +564,12 @@ Examples:
         print("  Or set COURTLISTENER_API_TOKEN environment variable\n")
     
     if args.years is not None:
-        # One or more years: create subfolder per year and crawl each
+        # One or more years: create decade subfolder then year subfolder, crawl each year
         years = sorted(set(args.years))
         output_base = Path(args.output)
         for year in years:
-            year_output = str(output_base / str(year))
+            decade = get_decade_folder(year)
+            year_output = str(output_base / decade / str(year))
             Path(year_output).mkdir(parents=True, exist_ok=True)
             index_url = build_api_url_from_year(year, args.courts, api_token)
             print(f"\n{'='*60}")
