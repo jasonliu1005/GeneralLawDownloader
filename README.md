@@ -154,6 +154,14 @@ Each case JSON file includes:
 - Each case is saved to its own JSON file; re-runs skip already-downloaded cases by URL
 - Multiple years create separate subfolders (e.g. `ma_cases/2016/`, `ma_cases/2017/`)
 
+### Troubleshooting: AWS WAF / 202 challenge page
+
+If the site returns HTTP 202 (or a page that says "verify you're not a robot"), CourtListener is behind **AWS WAF** and is blocking plain HTTP requests. The crawler will detect this and print a clear error. Options:
+
+- **Use the API crawler instead**: `case_crawler_api.py` uses the CourtListener REST API and avoids the WAF (see "CourtListener Case Crawler (API Version)" below). Requires an API token from [CourtListener](https://www.courtlistener.com/api/rest-info/).
+- Try again later or from a different network (e.g. home vs VPN).
+- To scrape the website anyway, you would need a headless browser (e.g. Playwright or Selenium) to run the challenge JavaScript; the current script uses `requests` only.
+
 ---
 
 ## Filter Cases by Content

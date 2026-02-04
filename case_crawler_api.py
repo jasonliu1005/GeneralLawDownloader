@@ -20,6 +20,7 @@ from urllib.parse import urlencode, quote
 
 BASE_URL = "https://www.courtlistener.com"
 API_BASE_URL = f"{BASE_URL}/api/rest/v4/search"
+OPINION_API_BASE = f"{BASE_URL}/api/rest/v4/opinions"
 REQUEST_DELAY = 1.0  # Delay between requests to be respectful
 OUTPUT_DIR = "law_cases"
 
@@ -120,6 +121,34 @@ def save_case_to_file(case_data: Dict, output_path: Path, case_index: Optional[i
         json.dump(case_data, f, indent=2, ensure_ascii=False)
     
     return case_file
+
+
+def get_downloaded_urls(output_path: Path) -> set:
+    """
+    Scan the output folder for existing case JSON files and return the set of
+    case URLs that have already been downloaded.
+    
+    Args:
+        output_path: Output directory path
+        
+    Returns:
+        Set of case URLs that are already in the output folder
+    """
+    downloaded = set()
+    if not output_path.exists():
+        return downloaded
+    
+    for json_file in output_path.glob("*.json"):
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                url = data.get('url')
+                if url:
+                    downloaded.add(url)
+        except (json.JSONDecodeError, OSError):
+            continue
+    
+    return downloaded
 
 
 def make_api_request(url: str, api_token: Optional[str] = None, max_retries: int = 3) -> Optional[requests.Response]:
@@ -244,10 +273,73 @@ def convert_api_result_to_case_data(api_result: Dict) -> Dict:
     case_data["posture"] = api_result.get('posture', '')
     case_data["suitNature"] = api_result.get('suitNature', '')
     
+    # full_text is always a field; populated when fetched from Opinion API
+    case_data["full_text"] = None
+    
     # Store full API response for reference
     case_data["api_data"] = api_result
     
     return case_data
+
+
+def fetch_opinion_full_text(opinion_id: int, api_token: Optional[str] = None) -> Optional[str]:
+    """
+    Fetch the full text of a single opinion from the CourtListener Opinion API.
+    
+    Args:
+        opinion_id: The opinion ID (from api_result['opinions'][i]['id'])
+        api_token: API token (optional but recommended)
+        
+    Returns:
+        Plain text of the opinion, or None if failed/unavailable
+    """
+    url = f"{OPINION_API_BASE}/{opinion_id}/"
+    response = make_api_request(url, api_token)
+    if not response:
+        return None
+    try:
+        data = response.json()
+        text = data.get("plain_text")
+        if text and isinstance(text, str):
+            return text.strip()
+        # Fall back to HTML and strip tags for readable text
+        html = data.get("html") or data.get("html_with_citations")
+        if html and isinstance(html, str):
+            # Simple tag strip: remove tags, collapse whitespace
+            plain = re.sub(r"<[^>]+>", " ", html)
+            plain = re.sub(r"\s+", " ", plain).strip()
+            return plain if plain else None
+        return None
+    except (json.JSONDecodeError, KeyError):
+        return None
+
+
+def fetch_full_text_for_case(api_result: Dict, api_token: Optional[str] = None) -> Optional[str]:
+    """
+    Fetch full opinion text for all opinions in a search result and combine them.
+    
+    Args:
+        api_result: One result from the search API (cluster with nested opinions)
+        api_token: API token (optional)
+        
+    Returns:
+        Combined full text of all opinions, or None if none could be fetched
+    """
+    opinions = api_result.get("opinions", [])
+    if not opinions:
+        return None
+    parts = []
+    for op in opinions:
+        op_id = op.get("id")
+        if op_id is None:
+            continue
+        text = fetch_opinion_full_text(op_id, api_token)
+        if text:
+            parts.append(text)
+        time.sleep(REQUEST_DELAY)
+    if not parts:
+        return None
+    return "\n\n---\n\n".join(parts)
 
 
 def fetch_case_content(case_url: str, api_token: Optional[str] = None) -> Optional[str]:
@@ -262,13 +354,17 @@ def fetch_case_content(case_url: str, api_token: Optional[str] = None) -> Option
     Returns:
         Full text content, or None if failed
     """
-    # For now, we'll use the API data. If full content is needed,
-    # we could fetch from the opinion detail endpoint
-    # This is a placeholder for future enhancement
+    # Full content is now fetched via fetch_opinion_full_text / fetch_full_text_for_case
     return None
 
 
-def crawl_cases_api(index_url: str, api_token: Optional[str] = None, max_results: Optional[int] = None, output_dir: str = OUTPUT_DIR) -> None:
+def crawl_cases_api(
+    index_url: str,
+    api_token: Optional[str] = None,
+    max_results: Optional[int] = None,
+    output_dir: str = OUTPUT_DIR,
+    fetch_full_text: bool = True,
+) -> None:
     """
     Main function to crawl cases from the API.
     
@@ -277,14 +373,21 @@ def crawl_cases_api(index_url: str, api_token: Optional[str] = None, max_results
         api_token: API token for authentication
         max_results: Maximum number of results to fetch (None for all)
         output_dir: Directory to save JSON files
+        fetch_full_text: If True, fetch full opinion text from Opinion API for each case
     """
     # Create output directory
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {output_path.absolute()}\n")
     
+    # Load set of already-downloaded case URLs (skip these)
+    downloaded_urls = get_downloaded_urls(output_path)
+    if downloaded_urls:
+        print(f"  Found {len(downloaded_urls)} already-downloaded cases in output folder (will skip).\n")
+    
     current_url = index_url
     total_cases_saved = 0
+    total_skipped = 0
     case_counter = 0
     
     print(f"Starting API crawl from: {index_url}\n")
@@ -325,6 +428,14 @@ def crawl_cases_api(index_url: str, api_token: Optional[str] = None, max_results
             if max_results and total_cases_saved >= max_results:
                 break
             
+            case_url = f"{BASE_URL}{api_result.get('absolute_url', '')}"
+            if case_url in downloaded_urls:
+                case_counter += 1
+                total_skipped += 1
+                case_name = api_result.get('caseName', api_result.get('caseNameFull', 'Unknown'))
+                print(f"    [{case_counter}] Skipped (already downloaded): {case_name}")
+                continue
+            
             case_counter += 1
             case_name = api_result.get('caseName', api_result.get('caseNameFull', 'Unknown'))
             print(f"    [{case_counter}] Processing: {case_name}")
@@ -332,9 +443,19 @@ def crawl_cases_api(index_url: str, api_token: Optional[str] = None, max_results
             # Convert API result to standardized format
             case_data = convert_api_result_to_case_data(api_result)
             
+            # Optionally fetch full opinion text (detailed case context)
+            if fetch_full_text:
+                full_text = fetch_full_text_for_case(api_result, api_token)
+                if full_text:
+                    case_data["full_text"] = full_text
+                    print(f"      Fetched full text ({len(full_text)} chars)")
+                else:
+                    print(f"      No full text available (snippet only)")
+            
             # Save each case to its own file immediately
             case_file = save_case_to_file(case_data, output_path, case_counter)
             total_cases_saved += 1
+            downloaded_urls.add(case_url)
             print(f"      ✓ Saved: {case_file.name}")
         
         # Check for next page
@@ -350,7 +471,7 @@ def crawl_cases_api(index_url: str, api_token: Optional[str] = None, max_results
             print("\n  No more pages found. Crawl complete.")
             current_url = None
     
-    print(f"\n✓ Download complete! Saved {total_cases_saved} cases to individual JSON files in: {output_path.absolute()}")
+    print(f"\n✓ Download complete! Saved {total_cases_saved} new cases ({total_skipped} already present) to: {output_path.absolute()}")
 
 
 if __name__ == "__main__":
@@ -359,14 +480,17 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Use year parameter (recommended)
+  # Single year (creates output_dir/2025/)
   python case_crawler_api.py --year 2025 --api-token YOUR_TOKEN
   
-  # Use custom URL
+  # Multiple years (creates output_dir/2023/, output_dir/2024/, output_dir/2025/)
+  python case_crawler_api.py --year 2023 2024 2025 --api-token YOUR_TOKEN
+  
+  # Use custom URL (no year subfolder; saves directly to output_dir)
   python case_crawler_api.py --url "https://www.courtlistener.com/api/rest/v4/search/?q=..." --api-token YOUR_TOKEN
   
-  # Limit to first 100 results
-  python case_crawler_api.py --year 2025 --max-results 100 --api-token YOUR_TOKEN
+  # Limit to first 100 results per year
+  python case_crawler_api.py --year 2024 2025 --max-results 100 --api-token YOUR_TOKEN
   
   # Get API token from environment variable
   export COURTLISTENER_API_TOKEN=your_token_here
@@ -379,13 +503,16 @@ Examples:
     url_group.add_argument(
         "-y", "--year",
         type=int,
-        help="Target year to crawl (e.g., 2025). Will construct API URL with date range 01/01/YEAR to 01/01/YEAR+1"
+        nargs="+",
+        dest="years",
+        metavar="YEAR",
+        help="One or more target years (e.g., -y 2024 2025). Creates a subfolder per year under output_dir."
     )
     url_group.add_argument(
         "-u", "--url",
         type=str,
         dest="index_url",
-        help="Custom API URL of the search endpoint to start crawling from"
+        help="Custom API URL of the search endpoint to start crawling from (no year subfolder)"
     )
     
     parser.add_argument(
@@ -412,6 +539,11 @@ Examples:
         default=None,
         help="API token for authentication. Can also be set via COURTLISTENER_API_TOKEN environment variable."
     )
+    parser.add_argument(
+        "--no-full-text",
+        action="store_true",
+        help="Do not fetch full opinion text (only metadata and snippet). Use to speed up or reduce API calls."
+    )
     
     args = parser.parse_args()
     
@@ -422,14 +554,34 @@ Examples:
         print("  Get a token at: https://www.courtlistener.com/api/rest-info/")
         print("  Or set COURTLISTENER_API_TOKEN environment variable\n")
     
-    # Determine the API URL
-    if args.year is not None:
-        index_url = build_api_url_from_year(args.year, args.courts, api_token)
-        print(f"Constructed API URL for year {args.year}: {index_url}\n")
+    if args.years is not None:
+        # One or more years: create subfolder per year and crawl each
+        years = sorted(set(args.years))
+        output_base = Path(args.output)
+        for year in years:
+            year_output = str(output_base / str(year))
+            Path(year_output).mkdir(parents=True, exist_ok=True)
+            index_url = build_api_url_from_year(year, args.courts, api_token)
+            print(f"\n{'='*60}")
+            print(f"Year {year} -> {year_output}")
+            print(f"API URL: {index_url}")
+            print(f"{'='*60}\n")
+            crawl_cases_api(
+                index_url,
+                api_token,
+                args.max_results,
+                year_output,
+                fetch_full_text=not args.no_full_text,
+            )
     else:
+        # Custom URL: single run, save directly to output_dir
         index_url = args.index_url
-        # Ensure it's an API URL
         if '/api/rest/v4/search' not in index_url:
             print("Warning: URL doesn't appear to be an API endpoint. Expected /api/rest/v4/search/")
-    
-    crawl_cases_api(index_url, api_token, args.max_results, args.output)
+        crawl_cases_api(
+            index_url,
+            api_token,
+            args.max_results,
+            args.output,
+            fetch_full_text=not args.no_full_text,
+        )

@@ -80,6 +80,26 @@ def make_request(url: str, max_retries: int = 3) -> Optional[requests.Response]:
     return None
 
 
+def is_aws_waf_challenge(response: requests.Response) -> bool:
+    """
+    Detect if the response is an AWS WAF JavaScript challenge page.
+    When the site returns 202 (or sometimes 200) with a challenge page,
+    the body contains awsWafCookieDomainList, challenge.js, or AwsWafIntegration.
+    """
+    if not response.content or len(response.content) < 200:
+        return False
+    try:
+        text = response.content.decode("utf-8", errors="ignore")
+        return (
+            "awsWafCookieDomainList" in text
+            or "challenge.js" in text
+            or "AwsWafIntegration" in text
+            or "token.awswaf.com" in text
+        )
+    except Exception:
+        return False
+
+
 def get_case_urls_from_index(index_url: str) -> tuple[List[str], Optional[BeautifulSoup]]:
     """
     Parse an index page to extract case detail page URLs.
@@ -92,6 +112,18 @@ def get_case_urls_from_index(index_url: str) -> tuple[List[str], Optional[Beauti
     """
     response = make_request(index_url)
     if not response:
+        return [], None
+    
+    if is_aws_waf_challenge(response):
+        print(
+            "  Error: The site returned an AWS WAF challenge page (anti-bot). "
+            "Use a browser or a headless browser (e.g. Playwright/Selenium) to pass the challenge, "
+            "or try again later from a different network."
+        )
+        return [], None
+    
+    if response.status_code not in (200, 202):
+        print(f"  Warning: Search index returned status {response.status_code} for {index_url}")
         return [], None
     
     soup = BeautifulSoup(response.content, 'lxml')
@@ -363,18 +395,22 @@ def parse_case_detail(case_url: str) -> Optional[Dict]:
     if not response:
         return None
     
-    # Debug: Check response
+    if is_aws_waf_challenge(response):
+        print(
+            f"  Error: Got AWS WAF challenge page for {case_url}. "
+            "The site is blocking automated requests. Use a browser or headless browser, or try again later."
+        )
+        return None
+    
     # Some sites return 202 (Accepted) or other codes that still contain content
     if response.status_code not in [200, 202]:
         print(f"  Warning: Got status code {response.status_code} for {case_url}")
         return None
     
-    # For 202, check if we actually got HTML content
+    # For 202, check if we actually got HTML content (and it's not a WAF page)
     if response.status_code == 202:
-        # Check if it's a redirect or empty response
         if not response.content or len(response.content) < 500:
             print(f"  Warning: Got 202 with insufficient content (length: {len(response.content) if response.content else 0})")
-            # Might be a rate limit or processing page - try to continue anyway
             if len(response.content) < 100:
                 return None
     
@@ -893,7 +929,13 @@ def crawl_cases(index_url: str, max_pages: Optional[int] = None, output_dir: str
                 # (This prevents infinite loops if pagination is broken)
                 print(f"  Checking next page: {next_url}")
                 test_response = make_request(next_url)
-                if test_response:
+                if test_response and is_aws_waf_challenge(test_response):
+                    print(
+                        "  Error: Next page returned AWS WAF challenge. Stopping. "
+                        "Use a browser or headless browser, or try again later."
+                    )
+                    current_url = None
+                elif test_response:
                     test_soup = BeautifulSoup(test_response.content, 'lxml')
                     test_results = test_soup.find('div', id='search-results')
                     if test_results:
