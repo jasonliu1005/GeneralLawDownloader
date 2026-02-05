@@ -194,6 +194,31 @@ def get_decade_folder(year: int) -> str:
     return f"{decade_start}s"
 
 
+def parse_year_or_decade(value: str) -> List[int]:
+    """
+    Parse a year or decade string into a list of years.
+    
+    - "1960s" or "1960S" -> [1960, 1961, ..., 1969]
+    - "2024" -> [2024]
+    
+    Args:
+        value: Either a 4-digit year or a decade like 1960s
+        
+    Returns:
+        List of years (one element for single year, 10 for a decade)
+        
+    Raises:
+        ValueError: If value is not a valid year or decade
+    """
+    value = value.strip()
+    if re.match(r"^\d{4}s$", value, re.IGNORECASE):
+        start = int(value[:4])
+        return list(range(start, start + 10))
+    if re.match(r"^\d{4}$", value):
+        return [int(value)]
+    raise ValueError(f"Invalid year or decade: {value!r}. Use a 4-digit year (e.g. 2024) or decade (e.g. 1960s).")
+
+
 def build_api_url_from_year(year: int, courts: str = DEFAULT_COURTS, api_token: Optional[str] = None) -> str:
     """
     Build a CourtListener API URL from a target year.
@@ -492,8 +517,11 @@ Examples:
   # Multiple years (creates output_dir/2020s/2023/, output_dir/2020s/2024/, etc.)
   python case_crawler_api.py --year 2023 2024 2025 --api-token YOUR_TOKEN
   
-  # Years span decades (creates output_dir/1970s/1975/, output_dir/1980s/1985/, ...)
-  python case_crawler_api.py --year 1975 1985 1995 --api-token YOUR_TOKEN
+  # Decade: download 1960-1969 (creates output_dir/1960s/1960/, ... output_dir/1960s/1969/)
+  python case_crawler_api.py --year 1960s --api-token YOUR_TOKEN
+  
+  # Mix years and decades (e.g. 1960s plus 2024)
+  python case_crawler_api.py --year 1960s 2024 2025 --api-token YOUR_TOKEN
   
   # Use custom URL (no year/decade subfolder; saves directly to output_dir)
   python case_crawler_api.py --url "https://www.courtlistener.com/api/rest/v4/search/?q=..." --api-token YOUR_TOKEN
@@ -511,11 +539,11 @@ Examples:
     url_group = parser.add_mutually_exclusive_group(required=True)
     url_group.add_argument(
         "-y", "--year",
-        type=int,
+        type=str,
         nargs="+",
         dest="years",
-        metavar="YEAR",
-        help="One or more target years (e.g., -y 2024 2025). Creates output_dir/<decade>/<year>/ (e.g. output_dir/2020s/2024/)."
+        metavar="YEAR_OR_DECADE",
+        help="Years and/or decades (e.g. -y 2024 2025 or -y 1960s). Decade like 1960s downloads 1960-1969. Creates output_dir/<decade>/<year>/."
     )
     url_group.add_argument(
         "-u", "--url",
@@ -564,8 +592,13 @@ Examples:
         print("  Or set COURTLISTENER_API_TOKEN environment variable\n")
     
     if args.years is not None:
-        # One or more years: create decade subfolder then year subfolder, crawl each year
-        years = sorted(set(args.years))
+        # Parse year/decade args (e.g. 2024, 1960s -> [2024] or [1960..1969])
+        try:
+            years = sorted(set(y for arg in args.years for y in parse_year_or_decade(arg)))
+        except ValueError as e:
+            parser.error(str(e))
+        if not years:
+            parser.error("No years to crawl")
         output_base = Path(args.output)
         for year in years:
             decade = get_decade_folder(year)
