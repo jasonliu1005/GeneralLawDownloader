@@ -406,9 +406,8 @@ def crawl_cases_api(
         output_dir: Directory to save JSON files
         fetch_full_text: If True, fetch full opinion text from Opinion API for each case
     """
-    # Create output directory
     output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
+    # Directory is created lazily when the first case is saved (see below)
     print(f"Output directory: {output_path.absolute()}\n")
     
     # Load set of already-downloaded case URLs (skip these)
@@ -483,6 +482,8 @@ def crawl_cases_api(
                 else:
                     print(f"      No full text available (snippet only)")
             
+            # Lazy-create year dir when first case is saved
+            output_path.mkdir(parents=True, exist_ok=True)
             # Save each case to its own file immediately
             case_file = save_case_to_file(case_data, output_path, case_counter)
             total_cases_saved += 1
@@ -526,6 +527,9 @@ Examples:
   # Use custom URL (no year/decade subfolder; saves directly to output_dir)
   python case_crawler_api.py --url "https://www.courtlistener.com/api/rest/v4/search/?q=..." --api-token YOUR_TOKEN
   
+  # Multiple courts (same run, cases from any of the listed courts)
+  python case_crawler_api.py --year 2024 -c mass ca1 --api-token YOUR_TOKEN
+  
   # Limit to first 100 results per year
   python case_crawler_api.py --year 2024 2025 --max-results 100 --api-token YOUR_TOKEN
   
@@ -567,8 +571,10 @@ Examples:
     parser.add_argument(
         "-c", "--courts",
         type=str,
-        default=DEFAULT_COURTS,
-        help=f"Court filter string (default: '{DEFAULT_COURTS}'). Only used with --year option."
+        nargs="+",
+        default=None,
+        metavar="COURT",
+        help=f"One or more court IDs (e.g. -c mass ca1). Default: {DEFAULT_COURTS!r}. Only used with --year option."
     )
     parser.add_argument(
         "-t", "--api-token",
@@ -599,12 +605,12 @@ Examples:
             parser.error(str(e))
         if not years:
             parser.error("No years to crawl")
+        courts_param = " ".join(args.courts) if args.courts else DEFAULT_COURTS
         output_base = Path(args.output)
         for year in years:
             decade = get_decade_folder(year)
             year_output = str(output_base / decade / str(year))
-            Path(year_output).mkdir(parents=True, exist_ok=True)
-            index_url = build_api_url_from_year(year, args.courts, api_token)
+            index_url = build_api_url_from_year(year, courts_param, api_token)
             print(f"\n{'='*60}")
             print(f"Year {year} -> {year_output}")
             print(f"API URL: {index_url}")
